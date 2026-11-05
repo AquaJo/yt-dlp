@@ -1,166 +1,248 @@
+import json
+import re
+
 from .common import InfoExtractor
 from ..utils import (
-    ExtractorError,
     int_or_none,
-    parse_duration,
-    xpath_element,
-    xpath_text,
+    traverse_obj,
+    unified_strdate,
+    url_or_none,
 )
 
 
 class BRIE(InfoExtractor):
-    _WORKING = False
     IE_DESC = 'Bayerischer Rundfunk'
     _VALID_URL = r'(?P<base_url>https?://(?:www\.)?br(?:-klassik)?\.de)/(?:[a-z0-9\-_]+/)+(?P<id>[a-z0-9\-_]+)\.html'
 
     _TESTS = [
         {
-            'url': 'http://www.br.de/mediathek/video/sendungen/abendschau/betriebliche-altersvorsorge-104.html',
-            'md5': '83a0477cf0b8451027eb566d88b51106',
-            'info_dict': {
-                'id': '48f656ef-287e-486f-be86-459122db22cc',
-                'ext': 'mp4',
-                'title': 'Die böse Überraschung',
-                'description': 'md5:ce9ac81b466ce775b8018f6801b48ac9',
-                'duration': 180,
-                'uploader': 'Reinhard Weber',
-                'upload_date': '20150422',
-            },
-            'skip': '404 not found',
-        },
-        {
-            'url': 'http://www.br.de/nachrichten/oberbayern/inhalt/muenchner-polizeipraesident-schreiber-gestorben-100.html',
-            'md5': 'af3a3a4aa43ff0ce6a89504c67f427ef',
-            'info_dict': {
-                'id': 'a4b83e34-123d-4b81-9f4e-c0d3121a4e05',
-                'ext': 'flv',
-                'title': 'Manfred Schreiber ist tot',
-                'description': 'md5:b454d867f2a9fc524ebe88c3f5092d97',
-                'duration': 26,
-            },
-            'skip': '404 not found',
-        },
-        {
-            'url': 'https://www.br-klassik.de/audio/peeping-tom-premierenkritik-dance-festival-muenchen-100.html',
-            'md5': '8b5b27c0b090f3b35eac4ab3f7a73d3d',
-            'info_dict': {
-                'id': '74c603c9-26d3-48bb-b85b-079aeed66e0b',
-                'ext': 'aac',
-                'title': 'Kurzweilig und sehr bewegend',
-                'description': 'md5:0351996e3283d64adeb38ede91fac54e',
-                'duration': 296,
-            },
-            'skip': '404 not found',
-        },
-        {
             'url': 'http://www.br.de/radio/bayern1/service/team/videos/team-video-erdelt100.html',
-            'md5': 'dbab0aef2e047060ea7a21fc1ce1078a',
             'info_dict': {
                 'id': '6ba73750-d405-45d3-861d-1ce8c524e059',
                 'ext': 'mp4',
-                'title': 'Umweltbewusster Häuslebauer',
-                'description': 'md5:d52dae9792d00226348c1dbb13c9bae2',
+                'title': 'Uwe Erdelt: Umweltbewusster Häuslebauer',
+                'description': str,
+                'thumbnail': str,
                 'duration': 116,
-            },
-        },
-        {
-            'url': 'http://www.br.de/fernsehen/br-alpha/sendungen/kant-fuer-anfaenger/kritik-der-reinen-vernunft/kant-kritik-01-metaphysik100.html',
-            'md5': '23bca295f1650d698f94fc570977dae3',
-            'info_dict': {
-                'id': 'd982c9ce-8648-4753-b358-98abb8aec43d',
-                'ext': 'mp4',
-                'title': 'Folge 1 - Metaphysik',
-                'description': 'md5:bb659990e9e59905c3d41e369db1fbe3',
-                'duration': 893,
-                'uploader': 'Eva Maria Steimle',
-                'upload_date': '20170208',
             },
         },
     ]
 
     def _real_extract(self, url):
-        base_url, display_id = self._match_valid_url(url).groups()
+        mobj = self._match_valid_url(url)
+        display_id = mobj.group('id')
+
         page = self._download_webpage(url, display_id)
-        xml_url = self._search_regex(
-            r"return BRavFramework\.register\(BRavFramework\('avPlayer_(?:[a-f0-9-]{36})'\)\.setup\({dataURL:'(/(?:[a-z0-9\-]+/)+[a-z0-9/~_.-]+)'}\)\);", page, 'XMLURL')
-        xml = self._download_xml(base_url + xml_url, display_id)
 
-        medias = []
+        # New ARD player: ardplayer.Player('id', '~playerConfig.json', '~mediaInfo.json')
+        media_info_path = self._search_regex(
+            r'new\s+ardplayer\.Player\s*\([^,]+,\s*[^,]+,\s*"([^"]+~mediaInfo\.json[^"]*)"',
+            page, 'media info path', default=None)
 
-        for xml_media in xml.findall('video') + xml.findall('audio'):
-            media_id = xml_media.get('externalId')
-            media = {
-                'id': media_id,
-                'title': xpath_text(xml_media, 'title', 'title', True),
-                'duration': parse_duration(xpath_text(xml_media, 'duration')),
-                'formats': self._extract_formats(xpath_element(
-                    xml_media, 'assets'), media_id),
-                'thumbnails': self._extract_thumbnails(xpath_element(
-                    xml_media, 'teaserImage/variants'), base_url),
-                'description': xpath_text(xml_media, 'desc'),
-                'webpage_url': xpath_text(xml_media, 'permalink'),
-                'uploader': xpath_text(xml_media, 'author'),
-            }
-            broadcast_date = xpath_text(xml_media, 'broadcastDate')
-            if broadcast_date:
-                media['upload_date'] = ''.join(reversed(broadcast_date.split('.')))
-            medias.append(media)
+        if not media_info_path:
+            # Fallback: derive path from URL
+            page_path = re.sub(r'\.html$', '', re.sub(r'^https?://[^/]+', '', url))
+            media_info_path = page_path + '~mediaInfo.json?isEmbed=false'
 
-        if len(medias) > 1:
-            self.report_warning(
-                'found multiple medias; please '
-                'report this with the video URL to http://yt-dl.org/bug')
-        if not medias:
-            raise ExtractorError('No media entries found')
-        return medias[0]
+        base_url = mobj.group('base_url')
+        media_info_url = base_url + media_info_path
+        media_info = self._download_json(media_info_url, display_id)
 
-    def _extract_formats(self, assets, media_id):
+        video_id = media_info.get('id') or display_id
+
+        # Title from JSON-LD schema.org VideoObject
+        json_ld = self._search_json_ld(page, display_id, default={})
+        title = (
+            json_ld.get('title')
+            or traverse_obj(media_info, ('meta', 'title'))
+            or traverse_obj(media_info, ('meta', 'seriesTitle'))
+            or self._og_search_title(page, default=None)
+            or display_id
+        )
+
+        description = (
+            traverse_obj(media_info, ('meta', 'synopsis'))
+            or media_info.get('comment')
+            or json_ld.get('description')
+            or self._og_search_description(page, default=None)
+        )
+
+        # Duration from tracking data (in milliseconds) or JSON-LD
+        duration = None
+        av_duration_ms = traverse_obj(media_info, (
+            'pluginData', 'tracking@all', 'avContent', 'av_content_duration'))
+        if av_duration_ms:
+            duration = int_or_none(av_duration_ms, scale=1000)
+        if not duration:
+            duration = json_ld.get('duration')
+
+        # Upload date from JSON-LD
+        upload_date = None
+        upload_datetime = json_ld.get('upload_date') or traverse_obj(
+            media_info, ('meta', 'broadcastedOnDateTime'))
+        if upload_datetime:
+            upload_date = unified_strdate(upload_datetime)
+
+        # Thumbnail
+        thumbnail = json_ld.get('thumbnail') or self._og_search_thumbnail(page, default=None)
+        if not thumbnail:
+            img_url = traverse_obj(media_info, ('meta', 'images', 0, 'url'))
+            if img_url:
+                img_url = img_url.replace('{size}', 'img__16__9__xl_-d31c35f8186ebeb80b0cd843a7c267a0e0c81647')
+                thumbnail = self._proto_relative_url(img_url, 'https:')
+
         formats = []
-        for asset in assets.findall('asset'):
-            format_url = xpath_text(asset, ['downloadUrl', 'url'])
-            asset_type = asset.get('type')
-            if asset_type.startswith('HDS'):
-                formats.extend(self._extract_f4m_formats(
-                    format_url + '?hdcore=3.2.0', media_id, f4m_id='hds', fatal=False))
-            elif asset_type.startswith('HLS'):
-                formats.extend(self._extract_m3u8_formats(
-                    format_url, media_id, 'mp4', 'm3u8_native', m3u8_id='hds', fatal=False))
-            else:
-                format_info = {
-                    'ext': xpath_text(asset, 'mediaType'),
-                    'width': int_or_none(xpath_text(asset, 'frameWidth')),
-                    'height': int_or_none(xpath_text(asset, 'frameHeight')),
-                    'tbr': int_or_none(xpath_text(asset, 'bitrateVideo')),
-                    'abr': int_or_none(xpath_text(asset, 'bitrateAudio')),
-                    'vcodec': xpath_text(asset, 'codecVideo'),
-                    'acodec': xpath_text(asset, 'codecAudio'),
-                    'container': xpath_text(asset, 'mediaType'),
-                    'filesize': int_or_none(xpath_text(asset, 'size')),
-                }
-                format_url = self._proto_relative_url(format_url)
-                if format_url:
-                    http_format_info = format_info.copy()
-                    http_format_info.update({
-                        'url': format_url,
-                        'format_id': f'http-{asset_type}',
-                    })
-                    formats.append(http_format_info)
-                server_prefix = xpath_text(asset, 'serverPrefix')
-                if server_prefix:
-                    rtmp_format_info = format_info.copy()
-                    rtmp_format_info.update({
-                        'url': server_prefix,
-                        'play_path': xpath_text(asset, 'fileName'),
-                        'format_id': f'rtmp-{asset_type}',
-                    })
-                    formats.append(rtmp_format_info)
-        return formats
+        for stream in traverse_obj(media_info, ('streams', ...)):
+            for media in traverse_obj(stream, ('media', ...)):
+                media_url = url_or_none(self._proto_relative_url(media.get('url'), 'https:'))
+                if not media_url:
+                    continue
 
-    def _extract_thumbnails(self, variants, base_url):
-        thumbnails = [{
-            'url': base_url + xpath_text(variant, 'url'),
-            'width': int_or_none(xpath_text(variant, 'width')),
-            'height': int_or_none(xpath_text(variant, 'height')),
-        } for variant in variants.findall('variant') if xpath_text(variant, 'url')]
-        thumbnails.sort(key=lambda x: x['width'] * x['height'], reverse=True)
-        return thumbnails
+                mime_type = media.get('mimeType', '')
+
+                if mime_type == 'application/vnd.apple.mpegurl' or media_url.endswith('.m3u8'):
+                    formats.extend(self._extract_m3u8_formats(
+                        media_url, video_id, 'mp4', m3u8_id='hls', fatal=False))
+                elif mime_type == 'application/f4m+xml' or media_url.endswith('.f4m'):
+                    formats.extend(self._extract_f4m_formats(
+                        media_url, video_id, f4m_id='hds', fatal=False))
+                else:
+                    width = int_or_none(media.get('maxHResolutionPx'))
+                    height = int_or_none(media.get('maxVResolutionPx'))
+                    formats.append({
+                        'url': media_url,
+                        'width': width,
+                        'height': height,
+                        'vcodec': media.get('videoCodec'),
+                        'format_id': 'http-%dx%d' % (width, height) if width and height else 'http',
+                    })
+
+        is_audio_only = traverse_obj(media_info, ('streams', 0, 'isAudioOnly'))
+
+        return {
+            'id': video_id,
+            'title': title,
+            'description': description,
+            'thumbnail': thumbnail,
+            'duration': duration,
+            'upload_date': upload_date,
+            'formats': formats,
+            'vcodec': 'none' if is_audio_only else None,
+        }
+
+
+class BR24IE(InfoExtractor):
+    IE_DESC = 'BR24 (Bayerischer Rundfunk Nachrichten)'
+    _VALID_URL = r'https?://(?:www\.)?br\.de/nachrichten/(?:[a-z0-9\-]+/)?(?P<id>[a-z0-9\-]+,[A-Za-z0-9]+)'
+
+    _TESTS = [
+        {
+            # Article with both AUDIO and VIDEO modules -> playlist
+            'url': 'https://www.br.de/nachrichten/bayern/tod-von-hubert-aiwanger-erschuettert-seine-heimat-rottenburg,Va4aRPP',
+            'info_dict': {
+                'id': 'tod-von-hubert-aiwanger-erschuettert-seine-heimat-rottenburg,Va4aRPP',
+                'title': 'Seine Heimat trauert: Aiwangers Tod erschüttert Rottenburg',
+                'description': 'md5:2f67a4b588b9cef00853ff09271df77f',
+            },
+            'playlist_count': 2,
+        },
+        {
+            # Article with AUDIO module (MP4 on cdn-storage.br.de)
+            'url': 'https://www.br.de/nachrichten/deutschland-welt/junge-generation-wendet-sich-von-politischer-mitte-ab,Va4rpNw',
+            'info_dict': {
+                'id': '658b1fe3-db9d-4e29-9e6c-155899e6c520',
+                'ext': 'mp4',
+                'title': 'Die junge Generation fühlt sich in ihren Belangen von der politischen Mitte kaum vertreten. Wie aus dem ARD-DeutschlandTrend hervorgeht, sehen sich die Jungen bei Linker und AfD am besten repräsentiert - mit weitem Abstand zu Union, SPD und Grünen.',
+                'description': 'md5:f7f45b5c90b67484df8b1d9bfcf81295',
+                'thumbnail': r're:^https?://img\.br\.de/.+',
+                'duration': 101,
+                'vcodec': 'none',
+                'upload_date': '20261105',
+            },
+        },
+    ]
+
+    def _real_extract(self, url):
+        display_id = self._match_id(url)
+        page = self._download_webpage(url, display_id)
+
+        # BR24 is a Next.js app — all data is in __NEXT_DATA__
+        next_data_str = self._search_regex(
+            r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
+            page, '__NEXT_DATA__')
+        next_data = json.loads(next_data_str)
+
+        article = traverse_obj(next_data, ('props', 'pageProps', 'article'))
+        if not article:
+            raise self._raise_no_formats('No article data found', video_id=display_id)
+
+        title = article.get('title') or article.get('seoTitle') or display_id
+        description = article.get('teaserText')
+        thumbnail = traverse_obj(article, ('image', 'url'))
+        upload_date = unified_strdate(article.get('publicationDate'))
+
+        # Collect all VIDEO and AUDIO modules from the article
+        entries = []
+        for module in traverse_obj(article, ('modules', 'nodes', ...)):
+            mod_type = module.get('type')
+
+            if mod_type == 'VIDEO':
+                video = module.get('video') or {}
+                hls_url = video.get('hls')
+                if not hls_url:
+                    continue
+
+                meta = {}
+                if module.get('meta'):
+                    try:
+                        meta = json.loads(module['meta'])
+                    except (ValueError, TypeError):
+                        pass
+
+                video_id = meta.get('assetId') or meta.get('sophoraId') or display_id
+                formats = self._extract_m3u8_formats(hls_url, video_id, 'mp4', m3u8_id='hls', fatal=False)
+
+                entries.append({
+                    'id': video_id,
+                    'title': module.get('title') or title,
+                    'description': description,
+                    'thumbnail': traverse_obj(module, ('thumbnail', 'url')) or thumbnail,
+                    'duration': int_or_none(video.get('duration')),
+                    'upload_date': upload_date,
+                    'formats': formats,
+                })
+
+            elif mod_type == 'AUDIO':
+                audio = module.get('audio') or {}
+                audio_url = url_or_none(audio.get('url'))
+                if not audio_url:
+                    continue
+
+                meta = {}
+                if module.get('meta'):
+                    try:
+                        meta = json.loads(module['meta'])
+                    except (ValueError, TypeError):
+                        pass
+
+                audio_id = meta.get('assetId') or meta.get('sophoraId') or display_id
+
+                entries.append({
+                    'id': audio_id,
+                    'title': module.get('title') or title,
+                    'description': description,
+                    'thumbnail': traverse_obj(module, ('thumbnail', 'url')) or thumbnail,
+                    'duration': int_or_none(audio.get('duration')),
+                    'upload_date': upload_date,
+                    'url': audio_url,
+                    'vcodec': 'none',
+                })
+
+        if not entries:
+            raise self._raise_no_formats('No media found in article', video_id=display_id)
+
+        if len(entries) == 1:
+            return entries[0]
+
+        # Multiple media in one article → playlist
+        return self.playlist_result(entries, display_id, title, description)

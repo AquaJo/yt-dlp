@@ -237,7 +237,10 @@ from .bostonglobe import BostonGlobeIE
 from .box import BoxIE
 from .boxcast import BoxCastVideoIE
 from .bpb import BpbIE
-from .br import BRIE
+from .br import (
+    BR24IE,
+    BRIE,
+)
 from .brainpop import (
     BrainPOPELLIE,
     BrainPOPEspIE,
